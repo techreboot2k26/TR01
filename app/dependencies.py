@@ -4,22 +4,22 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.database import get_db
 from app.auth.jwt import verify_jwt_token
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: sqlite3.Connection = Depends(get_db)
 ) -> dict:
     """
     Extracts Bearer token, verifies via local JWT validation (with mock fallback),
     resolves identity from SQLite database, and auto-syncs user profile if missing.
     """
-    token = credentials.credentials
-    if not token:
+    if not credentials or not credentials.credentials:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: Access token is missing"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Authentication credentials are required"
         )
+    token = credentials.credentials
 
     # Validate token and extract properties
     decoded = verify_jwt_token(token)

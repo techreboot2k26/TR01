@@ -388,6 +388,14 @@ def test_queue_position_and_people_ahead_recalculation():
     and verify people ahead count shifts when an ahead token gets cancelled.
     """
     import jwt
+    import sqlite3
+    
+    # Ensure fresh queue for srv-cnt
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-cnt';")
+    conn.commit()
+    conn.close()
+
     t1 = jwt.encode({"id": "usr-q1", "email": "q1@example.com", "name": "Q1"}, settings.jwt_secret, algorithm="HS256")
     t2 = jwt.encode({"id": "usr-q2", "email": "q2@example.com", "name": "Q2"}, settings.jwt_secret, algorithm="HS256")
     t3 = jwt.encode({"id": "usr-q3", "email": "q3@example.com", "name": "Q3"}, settings.jwt_secret, algorithm="HS256")
@@ -1174,6 +1182,532 @@ def test_staff_counter_endpoint():
     assert data["id"] == "cntr-lp-2"
     assert data["service_id"] == "srv-lp"
     assert data["assigned_staff_id"] == "usr-staff-rudresh"
+
+
+# ==============================================================================
+# Comprehensive Integration Tests for the 10 Hackathon Issues
+# ==============================================================================
+
+# Issue #1: Prevent Duplicate Active Tokens for the Same Service
+def test_issue_1_prevent_duplicate_active_tokens_for_same_service():
+    import jwt
+    token_auth = jwt.encode(
+        {"id": "usr-issue1-tester", "email": "issue1@queuecraft.edu", "name": "Issue 1 Tester"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+
+    # Clean up test user tokens first
+    import sqlite3
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE student_id = 'usr-issue1-tester';")
+    conn.commit()
+    conn.close()
+
+    # 1. Book first token for Central Library Printer (srv-lp)
+    res1 = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp", "counter_id": "cntr-lp-2"},
+        headers={"Authorization": f"Bearer {token_auth}"}
+    )
+    assert res1.status_code == 200
+    tkn1 = res1.json()["token"]
+    assert tkn1["status"] == "WAITING"
+
+    # 2. Attempt to book another token for the same service (srv-lp)
+    res2 = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp", "counter_id": "cntr-lp-2"},
+        headers={"Authorization": f"Bearer {token_auth}"}
+    )
+    assert res2.status_code == 400
+    assert "already have an active token" in res2.json()["message"]
+
+    # 3. Cancel the active token
+    res_cancel = client.patch(
+        f"/api/student/tokens/{tkn1['id']}/cancel",
+        headers={"Authorization": f"Bearer {token_auth}"}
+    )
+    assert res_cancel.status_code == 200
+
+    # 4. Now booking for srv-lp should succeed again
+    res3 = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp", "counter_id": "cntr-lp-2"},
+        headers={"Authorization": f"Bearer {token_auth}"}
+    )
+    assert res3.status_code == 200
+
+
+# Issue #2: Enforce Valid Token State Transitions
+def test_issue_2_enforce_valid_token_state_transitions():
+    import sqlite3
+    import jwt
+
+    student_auth = jwt.encode(
+        {"id": "usr-issue2-tester", "email": "issue2@queuecraft.edu", "name": "Issue 2 Tester"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+
+    # Clean srv-lp serving tokens and waiting tokens
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-lp';")
+    conn.commit()
+    conn.close()
+
+    # 1. Book a token (status = WAITING)
+    book_res = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp", "counter_id": "cntr-lp-2"},
+        headers={"Authorization": f"Bearer {student_auth}"}
+    )
+    assert book_res.status_code == 200
+    tkn_id = book_res.json()["token"]["id"]
+
+    # 2. Cannot COMPLETE a WAITING token
+    res_invalid_comp = client.post(
+        f"/api/staff/tokens/{tkn_id}/complete",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_invalid_comp.status_code == 400
+    assert "Invalid state transition" in res_invalid_comp.json()["message"]
+
+    # 3. Cannot HOLD a WAITING token
+    res_invalid_hold = client.post(
+        f"/api/staff/tokens/{tkn_id}/hold",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_invalid_hold.status_code == 400
+    assert "Invalid state transition" in res_invalid_hold.json()["message"]
+
+    # 4. Cannot RESUME a WAITING token
+    res_invalid_resume = client.post(
+        f"/api/staff/tokens/{tkn_id}/resume",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_invalid_resume.status_code == 400
+
+    # 5. Call next -> transitions to SERVING
+    call_res = client.post(
+        "/api/staff/counter/next",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert call_res.status_code == 200
+    serving_id = call_res.json()["token"]["id"]
+
+    # 6. Cannot CANCEL a SERVING token
+    res_invalid_cancel = client.patch(
+        f"/api/student/tokens/{serving_id}/cancel",
+        headers={"Authorization": f"Bearer {student_auth}"}
+    )
+    assert res_invalid_cancel.status_code == 400
+    assert "Invalid state transition" in res_invalid_cancel.json()["message"]
+
+    # 7. Complete token -> COMPLETED
+    comp_res = client.post(
+        f"/api/staff/tokens/{serving_id}/complete",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert comp_res.status_code == 200
+
+    # 8. Cannot transition a terminal COMPLETED token to SKIP, HOLD, or COMPLETE again
+    res_comp_again = client.post(
+        f"/api/staff/tokens/{serving_id}/complete",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_comp_again.status_code == 400
+
+    res_skip_terminal = client.post(
+        f"/api/staff/tokens/{serving_id}/skip",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_skip_terminal.status_code == 400
+
+
+# Issue #3: Add Pagination and Filtering to Student Token History
+def test_issue_3_student_token_history_pagination_and_filtering():
+    import sqlite3
+    import jwt
+
+    user_id = "usr-hist-tester"
+    user_auth = jwt.encode(
+        {"id": user_id, "email": "hist@queuecraft.edu", "name": "History Tester"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+
+    # Seed 7 historical tokens for user_id
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE student_id = ?;", (user_id,))
+    
+    # 3 COMPLETED for srv-lp, 2 CANCELLED for srv-cnt, 2 SKIPPED for srv-lp
+    statuses = [
+        ("COMPLETED", "srv-lp", "2026-08-10 10:00:00"),
+        ("COMPLETED", "srv-lp", "2026-08-11 11:00:00"),
+        ("COMPLETED", "srv-lp", "2026-08-12 12:00:00"),
+        ("CANCELLED", "srv-cnt", "2026-08-13 13:00:00"),
+        ("CANCELLED", "srv-cnt", "2026-08-14 14:00:00"),
+        ("SKIPPED", "srv-lp", "2026-08-15 15:00:00"),
+        ("SKIPPED", "srv-lp", "2026-08-16 16:00:00"),
+    ]
+    for idx, (st, srv, dt) in enumerate(statuses):
+        conn.execute(f"""
+            INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, status, created_at, completed_at)
+            VALUES ('tkn-hist-{idx}', 'HIST-00{idx}', '{user_id}', 'History Tester', '{srv}', 'cntr-lp-2', '{st}', '{dt}', '{dt}');
+        """)
+    conn.commit()
+    conn.close()
+
+    headers = {"Authorization": f"Bearer {user_auth}"}
+
+    # 1. Test pagination: page 1, limit 3
+    res_p1 = client.get("/api/student/tokens/history?page=1&limit=3", headers=headers)
+    assert res_p1.status_code == 200
+    data_p1 = res_p1.json()
+    assert len(data_p1["tokens"]) == 3
+    assert data_p1["total"] == 7
+    assert data_p1["page"] == 1
+    assert data_p1["limit"] == 3
+    assert data_p1["total_pages"] == 3
+
+    # 2. Test pagination: page 3, limit 3 (should return 1 token)
+    res_p3 = client.get("/api/student/tokens/history?page=3&limit=3", headers=headers)
+    assert res_p3.status_code == 200
+    data_p3 = res_p3.json()
+    assert len(data_p3["tokens"]) == 1
+
+    # 3. Test filtering by status = CANCELLED
+    res_status = client.get("/api/student/tokens/history?status=CANCELLED", headers=headers)
+    assert res_status.status_code == 200
+    data_status = res_status.json()
+    assert data_status["total"] == 2
+    assert all(t["status"] == "CANCELLED" for t in data_status["tokens"])
+
+    # 4. Test filtering by service_id = srv-cnt
+    res_service = client.get("/api/student/tokens/history?service_id=srv-cnt", headers=headers)
+    assert res_service.status_code == 200
+    data_service = res_service.json()
+    assert data_service["total"] == 2
+    assert all(t["service_id"] == "srv-cnt" for t in data_service["tokens"])
+
+    # 5. Test date filtering
+    res_date = client.get("/api/student/tokens/history?start_date=2026-08-14&end_date=2026-08-16", headers=headers)
+    assert res_date.status_code == 200
+    assert res_date.json()["total"] == 3
+
+
+# Issue #4: Implement Fair Priority Queue with Starvation Prevention
+def test_issue_4_fair_priority_queue_starvation_prevention():
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+    from app.services.queue_service import get_sorted_waiting_tokens
+
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-lp';")
+    
+    now = datetime.now(timezone.utc)
+    mins_ago = lambda m: (now - timedelta(minutes=m)).strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    # Starving NORMAL token: created 35 minutes ago (boosted by +2 with 15m threshold -> effective priority 3)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-starving-normal', 'LP-S01', 'usr-s1', 'Starving Normal', 'srv-lp', 'cntr-lp-2', 'NORMAL', 'WAITING', '{mins_ago(35)}');
+    """)
+
+    # Fresh URGENT token: created 1 minute ago (effective priority 3)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-fresh-urgent', 'LP-S02', 'usr-s2', 'Fresh Urgent', 'srv-lp', 'cntr-lp-2', 'URGENT', 'WAITING', '{mins_ago(1)}');
+    """)
+
+    # Fresh PRIORITY token: created 2 minutes ago (effective priority 2)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-fresh-priority', 'LP-S03', 'usr-s3', 'Fresh Priority', 'srv-lp', 'cntr-lp-2', 'PRIORITY', 'WAITING', '{mins_ago(2)}');
+    """)
+
+    # Fresh NORMAL token: created 3 minutes ago (effective priority 1)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-fresh-normal', 'LP-S04', 'usr-s4', 'Fresh Normal', 'srv-lp', 'cntr-lp-2', 'NORMAL', 'WAITING', '{mins_ago(3)}');
+    """)
+    conn.commit()
+
+    # Query sorted queue
+    sorted_tokens = get_sorted_waiting_tokens(conn, 'srv-lp')
+    conn.close()
+
+    # The starving normal token was boosted to effective priority 3, created earlier than fresh urgent -> 1st!
+    # Fresh urgent has effective priority 3 -> 2nd!
+    # Fresh priority has effective priority 2 -> 3rd!
+    # Fresh normal has effective priority 1 -> 4th!
+    assert len(sorted_tokens) == 4
+    assert sorted_tokens[0]["id"] == "tkn-starving-normal"
+    assert sorted_tokens[1]["id"] == "tkn-fresh-urgent"
+    assert sorted_tokens[2]["id"] == "tkn-fresh-priority"
+    assert sorted_tokens[3]["id"] == "tkn-fresh-normal"
+
+
+# Issue #5: Make Token Booking Safe Under Concurrent Requests
+def test_issue_5_concurrent_token_booking_safety():
+    import jwt
+    import threading
+    import queue
+
+    # Clean tokens for srv-cnt
+    import sqlite3
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-cnt';")
+    conn.commit()
+    conn.close()
+
+    num_threads = 12
+    auth_tokens = [
+        jwt.encode({"id": f"usr-conc-book-{i}", "email": f"conc{i}@queuecraft.edu", "name": f"User {i}"}, settings.jwt_secret, algorithm="HS256")
+        for i in range(num_threads)
+    ]
+
+    results = queue.Queue()
+
+    def worker(auth_tkn):
+        try:
+            res = client.post(
+                "/api/student/tokens/book",
+                json={"service_id": "srv-cnt", "counter_id": "cntr-cnt-1"},
+                headers={"Authorization": f"Bearer {auth_tkn}"}
+            )
+            results.put(res)
+        except Exception as ex:
+            results.put(ex)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in auth_tokens]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    token_numbers = []
+    while not results.empty():
+        item = results.get()
+        assert not isinstance(item, Exception), f"Concurrent request raised exception: {item}"
+        assert item.status_code == 200
+        token_numbers.append(item.json()["token"]["token_number"])
+
+    assert len(token_numbers) == num_threads
+    # All token numbers must be completely distinct (no duplicate sequences generated)
+    assert len(set(token_numbers)) == num_threads
+
+
+# Issue #6: Update Queue Positions and Wait Times in Real Time After Cancellation
+def test_issue_6_update_queue_positions_and_wait_times_after_cancellation():
+    import jwt
+    import sqlite3
+
+    t1 = jwt.encode({"id": "usr-pos-1", "email": "p1@queuecraft.edu", "name": "P1"}, settings.jwt_secret, algorithm="HS256")
+    t2 = jwt.encode({"id": "usr-pos-2", "email": "p2@queuecraft.edu", "name": "P2"}, settings.jwt_secret, algorithm="HS256")
+    t3 = jwt.encode({"id": "usr-pos-3", "email": "p3@queuecraft.edu", "name": "P3"}, settings.jwt_secret, algorithm="HS256")
+
+    # Clean srv-cnt tokens
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-cnt';")
+    conn.commit()
+    conn.close()
+
+    # Book T1, T2, T3
+    r1 = client.post("/api/student/tokens/book", json={"service_id": "srv-cnt", "counter_id": "cntr-cnt-1"}, headers={"Authorization": f"Bearer {t1}"})
+    r2 = client.post("/api/student/tokens/book", json={"service_id": "srv-cnt", "counter_id": "cntr-cnt-1"}, headers={"Authorization": f"Bearer {t2}"})
+    r3 = client.post("/api/student/tokens/book", json={"service_id": "srv-cnt", "counter_id": "cntr-cnt-1"}, headers={"Authorization": f"Bearer {t3}"})
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r3.status_code == 200
+
+    token2_id = r2.json()["token"]["id"]
+
+    # Check T3 initially
+    act_t3_before = client.get("/api/student/tokens/active", headers={"Authorization": f"Bearer {t3}"})
+    assert act_t3_before.json()["token"]["people_ahead"] == 2
+
+    # Cancel T2
+    cancel_res = client.patch(f"/api/student/tokens/{token2_id}/cancel", headers={"Authorization": f"Bearer {t2}"})
+    assert cancel_res.status_code == 200
+
+    # Real-time position of T3 drops to 1 person ahead
+    act_t3_after = client.get("/api/student/tokens/active", headers={"Authorization": f"Bearer {t3}"})
+    assert act_t3_after.json()["token"]["people_ahead"] == 1
+
+
+# Issue #7: Ensure Queue Operations Respect Counter Availability
+def test_issue_7_ensure_queue_operations_respect_counter_availability():
+    import sqlite3
+    import jwt
+
+    student_auth = jwt.encode(
+        {"id": "usr-avail-tester", "email": "avail@queuecraft.edu", "name": "Avail Tester"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+
+    # 1. Set counter cntr-lp-1 to CLOSED
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("UPDATE counters SET status = 'CLOSED' WHERE id = 'cntr-lp-1';")
+    conn.commit()
+    conn.close()
+
+    # Booking for CLOSED counter must fail
+    res_book_closed = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp", "counter_id": "cntr-lp-1"},
+        headers={"Authorization": f"Bearer {student_auth}"}
+    )
+    assert res_book_closed.status_code == 400
+    assert "not accepting new tokens" in res_book_closed.json()["message"]
+
+    # 2. Staff cannot call next token if counter is BUSY, CLOSED, or MAINTENANCE
+    client.patch("/api/staff/counter/status", json={"status": "BUSY"}, headers={"Authorization": "Bearer mock-token-staff"})
+    res_next_busy = client.post("/api/staff/counter/next", headers={"Authorization": "Bearer mock-token-staff"})
+    assert res_next_busy.status_code == 400
+    assert "Cannot call next token: Counter is currently BUSY" in res_next_busy.json()["message"]
+
+    # Reset counter back to OPEN
+    client.patch("/api/staff/counter/status", json={"status": "OPEN"}, headers={"Authorization": "Bearer mock-token-staff"})
+
+
+# Issue #8: Implement Intelligent Multi-Counter Load Balancing
+def test_issue_8_intelligent_multi_counter_load_balancing():
+    import sqlite3
+    import jwt
+
+    # Setup 2 OPEN counters for srv-lp: cntr-lp-1 (assigned to priya) and cntr-lp-2 (assigned to rudresh)
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-lp';")
+    conn.execute("UPDATE counters SET status = 'OPEN' WHERE service_id = 'srv-lp';")
+    
+    # Preload cntr-lp-2 with 3 tokens
+    for i in range(3):
+        conn.execute(f"""
+            INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status)
+            VALUES ('tkn-lb-{i}', 'LP-LB{i}', 'usr-preload-{i}', 'Preload', 'srv-lp', 'cntr-lp-2', 'NORMAL', 'WAITING');
+        """)
+    conn.commit()
+    conn.close()
+
+    # Now student books without specifying counter_id (auto load balancing)
+    student_auth = jwt.encode(
+        {"id": "usr-lb-student", "email": "lb@queuecraft.edu", "name": "LB Student"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+    res_book_auto = client.post(
+        "/api/student/tokens/book",
+        json={"service_id": "srv-lp"}, # No counter_id supplied!
+        headers={"Authorization": f"Bearer {student_auth}"}
+    )
+    assert res_book_auto.status_code == 200
+    booked_token = res_book_auto.json()["token"]
+    # Should automatically be assigned to cntr-lp-1 because it has 0 queue load vs cntr-lp-2 with 3 load
+    assert booked_token["counter_id"] == "cntr-lp-1"
+
+
+# Issue #9: Implement Automatic Waitlist Promotion with Fair Scheduling
+def test_issue_9_waitlist_auto_promotion_with_fair_scheduling():
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+
+    # Free cntr-lp-2
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("UPDATE tokens SET status = 'COMPLETED' WHERE counter_id = 'cntr-lp-2' AND status = 'SERVING';")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-lp';")
+
+    now = datetime.now(timezone.utc)
+    mins_ago = lambda m: (now - timedelta(minutes=m)).strftime('%Y-%m-%d %H:%M:%S.%f')
+
+    # Add Normal token (1 min ago) and High token (2 mins ago)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-wait-normal', 'LP-W1', 'usr-w1', 'Wait Normal', 'srv-lp', 'cntr-lp-2', 'NORMAL', 'WAITING', '{mins_ago(1)}');
+    """)
+    conn.execute(f"""
+        INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+        VALUES ('tkn-wait-high', 'LP-W2', 'usr-w2', 'Wait High', 'srv-lp', 'cntr-lp-2', 'HIGH', 'WAITING', '{mins_ago(2)}');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Promote next token at cntr-lp-2
+    res_promote = client.post(
+        "/api/staff/counter/promote",
+        headers={"Authorization": "Bearer mock-token-staff"}
+    )
+    assert res_promote.status_code == 200
+    promoted = res_promote.json()["token"]
+    # HIGH priority token must be selected and promoted to SERVING!
+    assert promoted["id"] == "tkn-wait-high"
+    assert promoted["status"] == "SERVING"
+    assert promoted["counter_id"] == "cntr-lp-2"
+    assert promoted["started_at"] is not None
+
+
+# Issue #10: Make Queue Processing Safe Under Concurrent Staff Operations
+def test_issue_10_concurrent_staff_next_operations_safety():
+    import jwt
+    import sqlite3
+    import threading
+    import queue
+
+    # Setup 2 staff counters: cntr-lp-1 (Priya) and cntr-lp-2 (Rudresh)
+    conn = sqlite3.connect("test_queuecraft.db")
+    conn.execute("UPDATE counters SET status = 'OPEN', assigned_staff_id = 'usr-staff-priya' WHERE id = 'cntr-lp-1';")
+    conn.execute("UPDATE counters SET status = 'OPEN', assigned_staff_id = 'usr-staff-rudresh' WHERE id = 'cntr-lp-2';")
+    conn.execute("UPDATE tokens SET status = 'COMPLETED' WHERE service_id = 'srv-lp' AND status = 'SERVING';")
+    conn.execute("DELETE FROM tokens WHERE service_id = 'srv-lp' AND status = 'WAITING';")
+
+    # Seed 6 waiting tokens
+    for i in range(6):
+        conn.execute(f"""
+            INSERT INTO tokens (id, token_number, student_id, student_name, service_id, counter_id, priority, status, created_at)
+            VALUES ('tkn-conc-staff-{i}', 'LP-CS{i}', 'usr-s', 'Student', 'srv-lp', 'cntr-lp-2', 'NORMAL', 'WAITING', '2026-08-20 00:00:0{i}');
+        """)
+    conn.commit()
+    conn.close()
+
+    staff_rudresh_token = "mock-token-staff"
+    staff_priya_token = jwt.encode(
+        {"id": "usr-staff-priya", "email": "priya@queuecraft.edu", "name": "Priya Singh", "role": "STAFF"},
+        settings.jwt_secret,
+        algorithm="HS256"
+    )
+
+    results = queue.Queue()
+
+    def staff_call_next(auth):
+        try:
+            res = client.post("/api/staff/counter/next", headers={"Authorization": f"Bearer {auth}"})
+            results.put(res)
+        except Exception as e:
+            results.put(e)
+
+    th1 = threading.Thread(target=staff_call_next, args=(staff_rudresh_token,))
+    th2 = threading.Thread(target=staff_call_next, args=(staff_priya_token,))
+
+    th1.start()
+    th2.start()
+
+    th1.join()
+    th2.join()
+
+    claimed_ids = []
+    while not results.empty():
+        res = results.get()
+        assert not isinstance(res, Exception), f"Staff concurrent next raised exception: {res}"
+        assert res.status_code == 200
+        claimed_ids.append(res.json()["token"]["id"])
+
+    # Both staff calls must have succeeded and claimed two distinct tokens
+    assert len(claimed_ids) == 2
+    assert len(set(claimed_ids)) == 2
+
 
 
 
