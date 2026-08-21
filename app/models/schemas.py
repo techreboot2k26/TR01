@@ -37,7 +37,8 @@ class CounterDiscoveryResponse(CounterBase):
 # Token schemas for Phase 2
 class TokenBookRequest(BaseModel):
     service_id: str
-    counter_id: str
+    counter_id: Optional[str] = None
+    priority: Optional[str] = "NORMAL"
 
 class TokenResponseDetail(BaseModel):
     id: str
@@ -70,4 +71,8 @@ class ActiveTokenResponse(BaseModel):
 
 class TokenHistoryListResponse(BaseModel):
     tokens: List[TokenResponseDetail]
+    total: Optional[int] = None
+    page: Optional[int] = None
+    limit: Optional[int] = None
+    total_pages: Optional[int] = None
 

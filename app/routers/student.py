@@ -115,7 +115,8 @@ def book_new_token(
         user_name=current_user["name"],
         user_email=current_user["email"],
         service_id=payload.service_id,
-        counter_id=payload.counter_id
+        counter_id=payload.counter_id,
+        priority=payload.priority or "NORMAL"
     )
     
     # Emit socket update after database commit
@@ -126,7 +127,7 @@ def book_new_token(
             "action": "CREATE",
             "tokenId": token["id"],
             "tokenNumber": token["token_number"],
-            "counterId": token["counter_id"]
+            "counterId": token.get("counter_id")
         }
     )
     
@@ -145,14 +146,28 @@ def get_active_token(
 
 @router.get("/tokens/history", response_model=TokenHistoryListResponse)
 def get_token_history(
+    page: int = 1,
+    limit: int = 10,
+    status: str | None = None,
+    service_id: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     db: sqlite3.Connection = Depends(get_db),
     current_user: dict = Depends(require_student)
 ):
     """
-    Retrieves past terminal tokens for the student.
+    Retrieves past terminal tokens for the student with pagination and filtering.
     """
-    tokens = student_service.get_token_history(db, user_id=current_user["id"])
-    return {"tokens": tokens}
+    return student_service.get_token_history(
+        db,
+        user_id=current_user["id"],
+        page=page,
+        limit=limit,
+        status_filter=status,
+        service_id=service_id,
+        start_date=start_date,
+        end_date=end_date
+    )
 
 @router.patch("/tokens/{token_id}/cancel")
 @router.post("/tokens/{token_id}/cancel")

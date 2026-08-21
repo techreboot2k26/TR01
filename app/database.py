@@ -26,6 +26,9 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
     # Enable WAL mode for concurrent operations
     conn.execute("PRAGMA journal_mode = WAL;")
     
+    # Set busy timeout for concurrent transactions
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    
     try:
         yield conn
     finally:

@@ -222,6 +222,35 @@ def call_next_queue_token(
         "dashboard": dashboard
     }
 
+@router.post("/counter/promote", response_model=StaffActionResponse)
+def promote_next_waitlist_token(
+    counter: dict = Depends(get_assigned_counter),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    """
+    Promotes the next eligible waiting token from the waitlist to SERVING at this counter.
+    """
+    token = queue_service.promote_next_token(db, service_id=counter["service_id"], counter_id=counter["id"])
+    
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM counters WHERE id = ?;", (counter["id"],))
+    updated_counter = dict(cursor.fetchone())
+    
+    dashboard = get_dashboard_data(db, updated_counter)
+    
+    from app.services import socket_service
+    socket_service.emit_token_called(counter_id=counter["id"], token=token)
+    socket_service.emit_queue_updated(
+        service_id=counter["service_id"],
+        payload={"action": "PROMOTE", "tokenId": token["id"], "counterId": counter["id"]}
+    )
+    
+    return {
+        "message": f"Token {token['token_number']} promoted to serving",
+        "token": token,
+        "dashboard": dashboard
+    }
+
 @router.post("/tokens/{token_id}/complete", response_model=StaffActionResponse)
 def complete_serving_token(
     token_id: str,
