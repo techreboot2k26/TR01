@@ -1,13 +1,8 @@
 name: Issue 4 Evaluator CI
 
 on:
-  push:
-    branches:
-      - main
-      - "feature/**"
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+  workflow_call:
 
 jobs:
   evaluate:

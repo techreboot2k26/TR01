@@ -1,13 +1,8 @@
 name: Issue 5 Evaluator CI
 
 on:
-  push:
-    branches:
-      - main
-      - "feature/**"
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+  workflow_call:
 
 jobs:
   evaluate:
@@ -29,4 +24,4 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Run Issue 5 Evaluator
-        run: python -m pytest tests/test_issue5_evaluator.py -v
+        run: python -m pytest tests/test_issue5_evaluator.py

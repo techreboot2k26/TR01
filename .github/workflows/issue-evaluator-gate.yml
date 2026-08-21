@@ -1,0 +1,49 @@
+name: Issue Gating CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  gate:
+    name: Issue Evaluator Gate
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      checks: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Trigger Target Evaluator Workflow
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/trigger_evaluator.py
+
+      - name: Verify Gating Contract
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/gate_check.py
